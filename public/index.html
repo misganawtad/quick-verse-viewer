@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Quick Verse Viewer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;background:#0b0d10;color:#e7edf3;margin:0;display:grid;place-items:center;min-height:100vh}
+    .card{background:#12161b;border:1px solid #1c222a;border-radius:14px;padding:20px;max-width:720px;width:92%}
+    .row{display:flex;gap:10px;margin:10px 0}
+    input,select,button{font:inherit}
+    input,select{flex:1;padding:10px;border:1px solid #2a3442;border-radius:10px;background:#0f1318;color:#e7edf3}
+    button{padding:10px 14px;border-radius:10px;border:0;background:#2c7be5;color:white;cursor:pointer}
+    button:hover{filter:brightness(1.05)}
+    button:disabled{opacity:.6;cursor:not-allowed}
+    .btn-secondary{background:#1a2330;color:#e7edf3;border:1px solid #2a3442}
+    .mono{font-family:ui-monospace,Consolas,Menlo,monospace}
+    .muted{color:#9fb1c3}
+    .error{color:#ff9aa5}
+    #out{white-space:nowrap; overflow-x:auto; border-top:1px solid #1c222a; padding-top:10px; margin-top:10px;}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2 style="margin:0 0 8px">Quick Verse Viewer</h2>
+    <div class="muted" style="margin-bottom:10px">
+      Pick a language, type a reference (e.g., <b>John 3:16</b> or <b>1 Corinthians 13:4-7</b>), click Fetch, then Copy.
+    </div>
+
+    <div class="row">
+      <select id="lang">
+        <option value="3202">Oromiffa — MacQul (3202)</option>
+        <option value="1260">Amharic — NASV (1260)</option>
+      </select>
+      <input id="ref" placeholder="e.g., John 3:16" />
+      <button id="go">Fetch</button>
+      <button id="copy" class="btn-secondary" disabled>Copy</button>
+    </div>
+
+    <div id="status" class="muted"></div>
+    <div id="out" class="mono"></div>
+  </div>
+
+  <script>
+    const $ = (id)=>document.getElementById(id);
+    const langEl = $("lang");
+    const refEl  = $("ref");
+    const goEl   = $("go");
+    const copyEl = $("copy");
+    const outEl  = $("out");
+    const statusEl = $("status");
+
+    function cleanPunct(s){
+      return String(s ?? "")
+        .replace(/<<\s*/g, "“")
+        .replace(/\s*>>/g, "”")
+        .replace(/\*/g, "");
+    }
+    function oneLine(s){
+      return cleanPunct(s)
+        .replace(/[\r\n\u000B\u000C\u0085\u2028\u2029]+/g, " ")
+        .replace(/\u00A0/g, " ")
+        .replace(/[\u200B-\u200D\uFEFF]/g, "")
+        .replace(/\s{2,}/g, " ")
+        .trim();
+    }
+    function validRef(s){
+      return /^([\d]?\s*[A-Za-z .]+)\s+\d+(:\d+(-\d+)?)?$/.test(s);
+    }
+    function enableCopy(ok){
+      copyEl.disabled = !ok;
+      if (!ok) copyEl.textContent = "Copy";
+    }
+
+    async function fetchWithTimeout(url, ms = 12000){
+      const ctrl = new AbortController();
+      const id = setTimeout(() => ctrl.abort(), ms);
+      try {
+        const res = await fetch(url, { signal: ctrl.signal });
+        return res;
+      } finally {
+        clearTimeout(id);
+      }
+    }
+
+    async function fetchVerse(){
+      const ver = Number(langEl.value);
+      const ref = refEl.value.trim();
+      outEl.textContent = "";
+      statusEl.textContent = "";
+      enableCopy(false);
+
+      if (!ref || !validRef(ref)) {
+        statusEl.innerHTML = '<span class="error">Bad reference. Try "John 3:16" or "1 Corinthians 13:4-7".</span>';
+        return;
+      }
+
+      statusEl.textContent = "Loading…";
+      try {
+        const url = `/api/verse?ref=${encodeURIComponent(ref)}&ver=${encodeURIComponent(ver)}`;
+        const res = await fetchWithTimeout(url, 13000);
+        let json = {};
+        try { json = await res.json(); } catch (_) {}
+
+        if (!res.ok || json.ok === false) {
+          const msg = json?.error || `HTTP ${res.status}`;
+          throw new Error(msg);
+        }
+
+        let text = "";
+        if (json?.data?.content) {
+          text = json.data.content;
+        } else if (Array.isArray(json?.data?.verses)) {
+          text = json.data.verses.map(v => v.content).join(" ");
+        } else {
+          text = "";
+        }
+
+        text = oneLine(text);
+        outEl.textContent = text;
+        statusEl.textContent = "";
+        enableCopy(!!text);
+      } catch (e) {
+        const human =
+          e.name === "AbortError" ? "Request timed out. Please try again." :
+          /timeout/i.test(e.message) ? "Upstream timeout. Please try again." :
+          e.message;
+        statusEl.innerHTML = `<span class="error">Error: ${human}</span>`;
+      }
+    }
+
+    async function copyVerse(){
+      const text = oneLine(outEl.textContent);
+      if (!text) return;
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const ta = document.createElement("textarea");
+          ta.value = text; ta.style.position = "fixed"; ta.style.left = "-9999px";
+          document.body.appendChild(ta); ta.select(); document.execCommand("copy"); document.body.removeChild(ta);
+        }
+        copyEl.textContent = "Copied!";
+        setTimeout(()=> copyEl.textContent = "Copy", 1200);
+      } catch (e) {
+        statusEl.innerHTML = `<span class="error">Copy failed: ${e.message}</span>`;
+      }
+    }
+
+    goEl.addEventListener("click", fetchVerse);
+    refEl.addEventListener("keydown", e => { if (e.key === "Enter") fetchVerse(); });
+    copyEl.addEventListener("click", copyVerse);
+  </script>
+</body>
+</html>
